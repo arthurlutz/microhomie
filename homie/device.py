@@ -1,8 +1,8 @@
-from gc import collect, mem_free
+from gc import collect
 from sys import platform
 
 from asyn import Event, launch
-from homie import __version__, utils
+from homie.utils import get_unique_id
 from homie.constants import (
     DEVICE_STATE,
     MAIN_DELAY,
@@ -43,13 +43,11 @@ class HomieDevice:
     def __init__(self, settings):
         self.debug = getattr(settings, "DEBUG", False)
         self._state = STATE_INIT
-        self._extensions = getattr(settings, "EXTENSIONS", [])
         self._first_start = True
-
-        self.stats_interval = getattr(settings, "DEVICE_STATS_INTERVAL", 60)
 
         self.nodes = []
         self.callback_topics = {}
+        self.extensions = {}
 
         self.device_name = getattr(settings, "DEVICE_NAME", b"mydevice")
 
@@ -57,7 +55,7 @@ class HomieDevice:
         try:
             device_id = settings.DEVICE_ID
         except AttributeError:
-            device_id = utils.get_unique_id()
+            device_id = get_unique_id()
 
         # Base topic
         self.btopic = getattr(settings, "MQTT_BASE_TOPIC", b"homie")
@@ -92,6 +90,10 @@ class HomieDevice:
         node.device = self
         self.nodes.append(node)
         launch(node.publish_data, ())
+
+    def add_extension(self, name, ext):
+        ext.device = self
+        self.extensions[name] = ext
 
     def format_topic(self, topic):
         if self.dtopic in topic:
@@ -221,35 +223,20 @@ class HomieDevice:
             b"$nodes", b",".join([n.id.encode() for n in self.nodes])
         )
 
-        # node properties
+        # publish node properties
         nodes = self.nodes
         for n in nodes:
             await n.publish_properties()
 
-        if self._extensions:
-            await publish(b"$extensions", b",".join(self._extensions))
-            if b"org.homie.legacy-firmware:0.1.1:[4.x]" in self._extensions:
-                await publish(b"$localip", utils.get_local_ip())
-                await publish(b"$mac", utils.get_local_mac())
-                await publish(b"$fw/name", b"Microhomie")
-                await publish(b"$fw/version", __version__)
-            if b"org.homie.legacy-stats:0.1.1:[4.x]" in self._extensions:
-                await self.publish(b"$stats/interval", self.stats_interval)
-                # Start stats coro
-                launch(self.publish_stats, ())
-
-    @await_ready_state
-    async def publish_stats(self):
-        from utime import time
-
-        start_time = time()
-        delay = self.stats_interval * MAIN_DELAY
-        publish = self.publish
-        while True:
-            uptime = time() - start_time
-            await publish(b"$stats/uptime", uptime)
-            await publish(b"$stats/freeheap", mem_free())
-            await sleep_ms(delay)
+        # publish extension properties
+        if self.extensions:
+            ext = self.extensions.values()
+            payload = []
+            for e in ext:
+                payload.append(e.ext_id)
+            await publish(b"$extensions", b",".join(payload))
+            for e in ext:
+                await e.publish_properties()
 
     async def run(self):
         while True:
